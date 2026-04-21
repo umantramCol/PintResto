@@ -1,5 +1,16 @@
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Text, ActivityIndicator, Alert, Modal, Pressable, Linking, ScrollView, Dimensions } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  View,
+  StyleSheet,
+  Text,
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Pressable,
+  Linking,
+  ScrollView,
+  Dimensions,
+} from 'react-native';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -12,15 +23,40 @@ import { GooglePlacesService } from '@/src/services/GooglePlacesService';
 import { CachedPlace, getCachedPlaces, savePlaces } from '@/src/db/PlacesRepository';
 import { RestaurantCard } from '@/src/components/RestaurantCard';
 
+// ---------------------------------------------------------------------------
+// Tipos
+// ---------------------------------------------------------------------------
+interface PlaceDetails {
+  open_now?: boolean;
+  weekday_text?: string[];
+  photos?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// renderItem hoisted fuera del componente para una referencia estable (regla 2.1, 2.2)
+// Recibe onPress y el mapa de places por place_id para pasar primitivos (regla 2.5)
+// ---------------------------------------------------------------------------
+type RenderItemArgs = {
+  item: CachedPlace;
+};
+
 export default function HomeScreen() {
   const [places, setPlaces] = useState<CachedPlace[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [selectedPlace, setSelectedPlace] = useState<CachedPlace | null>(null);
-  const [placeDetails, setPlaceDetails] = useState<{open_now?: boolean; weekday_text?: string[]; photos?: string[]}|null>(null);
+  const [placeDetails, setPlaceDetails] = useState<PlaceDetails | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [currentLocationStr, setCurrentLocationStr] = useState<string>('Obteniendo tu ubicación...');
 
-  const handleSelectPlace = async (place: CachedPlace | null) => {
+  // useCallback para estabilizar la referencia del handler (regla 2.2)
+  const handleSelectPlace = useCallback(async (place_id: string | null) => {
+    if (!place_id) {
+      setSelectedPlace(null);
+      setPlaceDetails(null);
+      return;
+    }
+    const place = places.find((p) => p.place_id === place_id) ?? null;
     setSelectedPlace(place);
     if (place) {
       setLoadingDetails(true);
@@ -29,49 +65,73 @@ export default function HomeScreen() {
       setPlaceDetails(details);
       setLoadingDetails(false);
     }
-  };
+  }, [places]);
+
+  // renderItem con referencia estable usando useCallback (regla 2.1, 2.2)
+  // MasonryList tipifica item como unknown, hacemos el cast aquí para mantener la seguridad de tipos
+  const renderItem = useCallback(({ item }: { item: unknown }) => {
+    const place = item as CachedPlace;
+    return (
+      <RestaurantCard
+        place_id={place.place_id}
+        name={place.name}
+        photo_url={place.photo_url}
+        rating={place.rating}
+        onPress={handleSelectPlace}
+      />
+    );
+  }, [handleSelectPlace]);
+
+  // keyExtractor estable (regla 2.2)
+  const keyExtractor = useCallback((item: CachedPlace): string => item.place_id, []);
 
   useEffect(() => {
     fetchRestaurants();
   }, []);
 
-  const fetchRestaurants = async () => {
+  const fetchRestaurants = async (isRefresh = false) => {
     try {
-      setLoading(true);
+      if (isRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
       const db = await SQLite.openDatabaseAsync('pintresto.db');
-      
-      const cached = await getCachedPlaces(db);
-      if (cached.length > 0) {
-        setPlaces(cached);
-        setLoading(false);
-        return;
+
+      // Solo usa cache si NO es un refresh manual
+      if (!isRefresh) {
+        const cached = await getCachedPlaces(db);
+        if (cached.length > 0) {
+          setPlaces(cached);
+          setLoading(false);
+          return;
+        }
       }
 
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permiso denegado', 'Se necesita acceso a la ubicación para buscar restaurantes cercanos.');
-        setLoading(false);
         return;
       }
 
       let location = await Location.getCurrentPositionAsync({});
-      // Decodificar la dirección actual
+
       try {
         const geocode = await Location.reverseGeocodeAsync({
           latitude: location.coords.latitude,
-          longitude: location.coords.longitude
+          longitude: location.coords.longitude,
         });
-        if (geocode && geocode.length > 0) {
+        if (geocode.length > 0) {
           const block = geocode[0];
           setCurrentLocationStr(`${block.street || block.name}, ${block.city || block.region}`);
         } else {
           setCurrentLocationStr('Ubicación encontrada');
         }
-      } catch(e) {
+      } catch {
         setCurrentLocationStr('Ubicación encontrada');
       }
 
-      // Ampliamos el rango a 5000 metros (5KM)
       const results = await GooglePlacesService.getNearbyRestaurants(
         location.coords.latitude,
         location.coords.longitude,
@@ -89,16 +149,49 @@ export default function HomeScreen() {
       Alert.alert('Error', 'Hubo un problema al buscar restaurantes.');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  const openGoogleMaps = () => {
+  // useCallback para estabilizar (regla 2.2)
+  const handleRefresh = useCallback(() => fetchRestaurants(true), []);
+
+  // useCallback para estabilizar (regla 2.2)
+  const openGoogleMaps = useCallback(() => {
     if (selectedPlace?.maps_url) {
-      Linking.openURL(selectedPlace.maps_url).catch((err) =>
+      Linking.openURL(selectedPlace.maps_url).catch(() =>
         Alert.alert('Error', 'No se pudo abrir el enlace de Google Maps.')
       );
     }
-  };
+  }, [selectedPlace]);
+
+  const closeModal = useCallback(() => handleSelectPlace(null), [handleSelectPlace]);
+
+  // Memoizar el array de fotos para evitar recrearlo en cada render (regla 2.4)
+  const carouselPhotos = useMemo<string[]>(() => {
+    if (placeDetails?.photos && placeDetails.photos.length > 0) {
+      return placeDetails.photos;
+    }
+    return selectedPlace?.photo_url ? [selectedPlace.photo_url] : [];
+  }, [placeDetails?.photos, selectedPlace?.photo_url]);
+
+  // Calcular estado/horas del lugar (derivado, no estado adicional) (regla 6.1)
+  const openStatusText = useMemo(() => {
+    if (!placeDetails) return null;
+    const isOpen = placeDetails.open_now;
+    const statusText = isOpen ? 'Abierto ahora' : 'Cerrado';
+    const statusColor = isOpen ? '#4CAF50' : '#F44336';
+
+    let hoursToday = '';
+    if (placeDetails.weekday_text && placeDetails.weekday_text.length > 0) {
+      const todayIdx = (new Date().getDay() + 6) % 7;
+      const todayString = placeDetails.weekday_text[todayIdx] || placeDetails.weekday_text[0];
+      const splitIdx = todayString.indexOf(':');
+      hoursToday = splitIdx !== -1 ? todayString.slice(splitIdx + 1).trim() : todayString;
+    }
+
+    return { statusText, statusColor, hoursToday, isDefined: isOpen !== undefined };
+  }, [placeDetails]);
 
   if (loading) {
     return (
@@ -113,54 +206,63 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>PintResto</Text>
-        <Text style={styles.subtitle}>Cerca de: {currentLocationStr}</Text>
+        {/* Usa ternario en vez de && para evitar render de string vacío (regla 1.1) */}
+        <Text style={styles.subtitle}>
+          {currentLocationStr ? `Cerca de: ${currentLocationStr}` : 'Obteniendo ubicación...'}
+        </Text>
       </View>
+
       <MasonryList
         data={places}
-        keyExtractor={(item): string => item.place_id}
+        keyExtractor={keyExtractor}
         numColumns={2}
         showsVerticalScrollIndicator={false}
-        renderItem={({ item }) => <RestaurantCard item={item as CachedPlace} onPress={handleSelectPlace} />}
+        renderItem={renderItem}
         contentContainerStyle={styles.masonryContainer}
-        onRefresh={fetchRestaurants}
+        onRefresh={handleRefresh}
+        refreshing={refreshing}
       />
 
-      {/* Modal / Popup de Detalles */}
+      {/* Modal de Detalles */}
       <Modal
         visible={!!selectedPlace}
         animationType="slide"
         transparent={true}
-        onRequestClose={() => handleSelectPlace(null)}
+        onRequestClose={closeModal}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            {selectedPlace && (
+            {selectedPlace ? (
               <>
-                <View style={{ height: '50%', width: '100%' }}>
-                  <ScrollView 
-                    horizontal 
-                    pagingEnabled 
+                {/* Carousel de fotos — usa el array memoizado (regla 2.4) */}
+                <View style={styles.carouselContainer}>
+                  <ScrollView
+                    horizontal
+                    pagingEnabled
                     showsHorizontalScrollIndicator={false}
-                    style={{ flex: 1 }}
+                    style={styles.carouselScroll}
                   >
-                    {(placeDetails?.photos && placeDetails.photos.length > 0 ? placeDetails.photos : [selectedPlace.photo_url]).map((photoUri, index) => (
+                    {carouselPhotos.map((photoUri, index) => (
                       <Image
                         key={index}
                         source={{ uri: photoUri }}
-                        style={{ width: SCREEN_WIDTH, height: '100%' }}
+                        style={styles.carouselImage}
                         contentFit="cover"
+                        cachePolicy="memory-disk"
                       />
                     ))}
                   </ScrollView>
                   <View style={styles.carouselIndicators}>
-                    {(placeDetails?.photos && placeDetails.photos.length > 0 ? placeDetails.photos : [selectedPlace.photo_url]).map((_, i) => (
+                    {carouselPhotos.map((_, i) => (
                       <View key={i} style={styles.dot} />
                     ))}
                   </View>
                 </View>
+
                 <ScrollView contentContainerStyle={styles.modalBody}>
                   <View>
                     <Text style={styles.modalTitle}>{selectedPlace.name}</Text>
+                    {/* Ternario con null en vez de && (regla 1.1) */}
                     {selectedPlace.rating ? (
                       <Text style={styles.ratingText}>
                         ⭐ {selectedPlace.rating} ({selectedPlace.user_ratings_total} reseñas)
@@ -169,50 +271,35 @@ export default function HomeScreen() {
                     <Text style={styles.modalAddress}>{selectedPlace.address}</Text>
 
                     {loadingDetails ? (
-                      <ActivityIndicator style={{ marginTop: 16 }} size="small" color="#ff5252" />
-                    ) : placeDetails ? (
+                      <ActivityIndicator style={styles.detailsLoader} size="small" color="#ff5252" />
+                    ) : openStatusText ? (
                       <View style={styles.detailsContainer}>
-                        {(() => {
-                           const statusText = placeDetails.open_now ? 'Abierto ahora' : 'Cerrado';
-                           const statusColor = placeDetails.open_now ? '#4CAF50' : '#F44336';
-                           
-                           let hoursToday = '';
-                           if (placeDetails.weekday_text && placeDetails.weekday_text.length > 0) {
-                             // En la API de Google Places, weekday_text asume índice 0 = Lunes
-                             const todayIdx = (new Date().getDay() + 6) % 7;
-                             const todayString = placeDetails.weekday_text[todayIdx] || placeDetails.weekday_text[0];
-                             const splitIdx = todayString.indexOf(':');
-                             if (splitIdx !== -1) {
-                               hoursToday = todayString.slice(splitIdx + 1).trim();
-                             } else {
-                               hoursToday = todayString;
-                             }
-                           }
-
-                           return (
-                             <Text style={{ fontSize: 16 }}>
-                               {placeDetails.open_now !== undefined && (
-                                 <Text style={{ fontWeight: 'bold', color: statusColor }}>{statusText}</Text>
-                               )}
-                               {hoursToday ? <Text style={{ color: '#555' }}> • {hoursToday}</Text> : null}
-                             </Text>
-                           );
-                        })()}
+                        <Text style={styles.statusText}>
+                          {/* Ternario en vez de && para evitar crash con open_now=false (regla 1.1) */}
+                          {openStatusText.isDefined ? (
+                            <Text style={{ fontWeight: 'bold', color: openStatusText.statusColor }}>
+                              {openStatusText.statusText}
+                            </Text>
+                          ) : null}
+                          {openStatusText.hoursToday ? (
+                            <Text style={styles.hoursText}> • {openStatusText.hoursToday}</Text>
+                          ) : null}
+                        </Text>
                       </View>
                     ) : null}
                   </View>
-                  
+
                   <View style={styles.modalActions}>
                     <Pressable style={styles.mapsButton} onPress={openGoogleMaps}>
                       <Text style={styles.mapsButtonText}>Abrir en Maps</Text>
                     </Pressable>
-                    <Pressable style={styles.closeButton} onPress={() => handleSelectPlace(null)}>
+                    <Pressable style={styles.closeButton} onPress={closeModal}>
                       <Text style={styles.closeButtonText}>Cerrar</Text>
                     </Pressable>
                   </View>
                 </ScrollView>
               </>
-            )}
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -220,6 +307,7 @@ export default function HomeScreen() {
   );
 }
 
+// Todos los estilos en StyleSheet.create — sin inline objects (regla 9.2)
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -254,7 +342,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingBottom: 24,
   },
-  // Estilos del Modal
+  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -264,8 +352,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    height: '60%',
+    height: '75%',
     overflow: 'hidden',
+  },
+  // Carousel — inline styles eliminados, ahora en StyleSheet (regla 9.2)
+  carouselContainer: {
+    height: '45%',
+    width: '100%',
+  },
+  carouselScroll: {
+    flex: 1,
+  },
+  carouselImage: {
+    width: SCREEN_WIDTH,
+    height: '100%',
   },
   carouselIndicators: {
     position: 'absolute',
@@ -284,7 +384,7 @@ const styles = StyleSheet.create({
   },
   modalBody: {
     padding: 24,
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'space-between',
   },
   modalTitle: {
@@ -310,24 +410,14 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#f0f0f0',
   },
-  openStatus: {
+  detailsLoader: {
+    marginTop: 16,
+  },
+  statusText: {
     fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 8,
   },
-  hoursContainer: {
-    marginTop: 8,
-  },
-  hoursTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#444',
-    marginBottom: 4,
-  },
-  hourText: {
-    fontSize: 13,
-    color: '#666',
-    lineHeight: 20,
+  hoursText: {
+    color: '#555',
   },
   modalActions: {
     flexDirection: 'row',
