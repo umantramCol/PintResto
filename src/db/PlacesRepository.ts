@@ -1,4 +1,4 @@
-import * as SQLite from 'expo-sqlite';
+import { Platform } from 'react-native';
 
 export interface CachedPlace {
   place_id: string;
@@ -13,7 +13,21 @@ export interface CachedPlace {
   cached_at: number;
 }
 
-export const savePlaces = async (db: SQLite.SQLiteDatabase, places: CachedPlace[]) => {
+// Solo importamos expo-sqlite en plataformas nativas
+let SQLite: typeof import('expo-sqlite') | null = null;
+if (Platform.OS !== 'web') {
+  SQLite = require('expo-sqlite');
+}
+
+// Tipo genérico para la base de datos (null en web)
+type Database = Awaited<ReturnType<NonNullable<typeof SQLite>['openDatabaseAsync']>> | null;
+
+export const savePlaces = async (db: Database, places: CachedPlace[]) => {
+  if (!db || !SQLite) {
+    // En web, no se persiste — simplemente retorna
+    return;
+  }
+
   const statement = await db.prepareAsync(
     'INSERT OR REPLACE INTO places_cache (place_id, name, lat, lng, photo_url, address, maps_url, rating, user_ratings_total, cached_at) VALUES ($place_id, $name, $lat, $lng, $photo_url, $address, $maps_url, $rating, $user_ratings_total, $cached_at)'
   );
@@ -37,7 +51,12 @@ export const savePlaces = async (db: SQLite.SQLiteDatabase, places: CachedPlace[
   }
 };
 
-export const getCachedPlaces = async (db: SQLite.SQLiteDatabase): Promise<CachedPlace[]> => {
+export const getCachedPlaces = async (db: Database): Promise<CachedPlace[]> => {
+  if (!db || !SQLite) {
+    // En web, no hay cache — retorna vacío
+    return [];
+  }
+
   const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
   
   const allRows = await db.getAllAsync<CachedPlace>(

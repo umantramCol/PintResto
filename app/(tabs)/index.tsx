@@ -10,12 +10,12 @@ import {
   Linking,
   ScrollView,
   Dimensions,
+  Platform,
 } from 'react-native';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
-import * as SQLite from 'expo-sqlite';
 import MasonryList from '@react-native-seoul/masonry-list';
 import { Image } from 'expo-image';
 
@@ -85,6 +85,29 @@ export default function HomeScreen() {
   // keyExtractor estable (regla 2.2)
   const keyExtractor = useCallback((item: CachedPlace): string => item.place_id, []);
 
+  // Obtiene la ubicación actual de forma independiente (siempre, con o sin cache)
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        const location = await Location.getCurrentPositionAsync({});
+        const geocode = await Location.reverseGeocodeAsync({
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+        });
+        if (geocode.length > 0) {
+          const block = geocode[0];
+          setCurrentLocationStr(`${block.street || block.name}, ${block.city || block.region}`);
+        } else {
+          setCurrentLocationStr('Ubicación encontrada');
+        }
+      } catch {
+        setCurrentLocationStr('Ubicación encontrada');
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     fetchRestaurants();
   }, []);
@@ -97,7 +120,12 @@ export default function HomeScreen() {
         setLoading(true);
       }
 
-      const db = await SQLite.openDatabaseAsync('pintresto.db');
+      // En web no usamos SQLite (no está soportado), en mobile sí
+      let db = null;
+      if (Platform.OS !== 'web') {
+        const SQLite = require('expo-sqlite');
+        db = await SQLite.openDatabaseAsync('pintresto.db');
+      }
 
       // Solo usa cache si NO es un refresh manual
       if (!isRefresh) {
@@ -116,21 +144,6 @@ export default function HomeScreen() {
       }
 
       let location = await Location.getCurrentPositionAsync({});
-
-      try {
-        const geocode = await Location.reverseGeocodeAsync({
-          latitude: location.coords.latitude,
-          longitude: location.coords.longitude,
-        });
-        if (geocode.length > 0) {
-          const block = geocode[0];
-          setCurrentLocationStr(`${block.street || block.name}, ${block.city || block.region}`);
-        } else {
-          setCurrentLocationStr('Ubicación encontrada');
-        }
-      } catch {
-        setCurrentLocationStr('Ubicación encontrada');
-      }
 
       const results = await GooglePlacesService.getNearbyRestaurants(
         location.coords.latitude,

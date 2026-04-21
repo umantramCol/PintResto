@@ -19,7 +19,11 @@ export default function RootLayout() {
   useEffect(() => {
     syncDatabase()
       .then(() => setDbReady(true))
-      .catch((error) => console.error('Error initializing db:', error));
+      .catch((error) => {
+        console.error('Error initializing db:', error);
+        // En web, seguir de todos modos sin DB
+        setDbReady(true);
+      });
   }, []);
 
   if (!dbReady) {
