@@ -15,6 +15,8 @@ export const syncDatabase = async () => {
       photo_url TEXT,
       address TEXT,
       maps_url TEXT,
+      rating REAL,
+      user_ratings_total INTEGER,
       cached_at INTEGER NOT NULL
     );
   `);

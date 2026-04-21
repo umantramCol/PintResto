@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Text, ActivityIndicator, Alert, Modal, Pressable, Linking } from 'react-native';
+import { View, StyleSheet, Text, ActivityIndicator, Alert, Modal, Pressable, Linking, ScrollView, Dimensions } from 'react-native';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import * as SQLite from 'expo-sqlite';
@@ -14,7 +16,20 @@ export default function HomeScreen() {
   const [places, setPlaces] = useState<CachedPlace[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPlace, setSelectedPlace] = useState<CachedPlace | null>(null);
+  const [placeDetails, setPlaceDetails] = useState<{open_now?: boolean; weekday_text?: string[]; photos?: string[]}|null>(null);
+  const [loadingDetails, setLoadingDetails] = useState(false);
   const [currentLocationStr, setCurrentLocationStr] = useState<string>('Obteniendo tu ubicación...');
+
+  const handleSelectPlace = async (place: CachedPlace | null) => {
+    setSelectedPlace(place);
+    if (place) {
+      setLoadingDetails(true);
+      setPlaceDetails(null);
+      const details = await GooglePlacesService.getPlaceDetails(place.place_id);
+      setPlaceDetails(details);
+      setLoadingDetails(false);
+    }
+  };
 
   useEffect(() => {
     fetchRestaurants();
@@ -39,15 +54,7 @@ export default function HomeScreen() {
         return;
       }
 
-      // let location = await Location.getCurrentPositionAsync({});
-      
-      // Temporarily set to Sabaneta, Antioquia
-      let location = {
-        coords: {
-          latitude: 6.1517,
-          longitude: -75.6152
-        }
-      } as Location.LocationObject;      
+      let location = await Location.getCurrentPositionAsync({});
       // Decodificar la dirección actual
       try {
         const geocode = await Location.reverseGeocodeAsync({
@@ -113,7 +120,7 @@ export default function HomeScreen() {
         keyExtractor={(item): string => item.place_id}
         numColumns={2}
         showsVerticalScrollIndicator={false}
-        renderItem={({ item }) => <RestaurantCard item={item as CachedPlace} onPress={setSelectedPlace} />}
+        renderItem={({ item }) => <RestaurantCard item={item as CachedPlace} onPress={handleSelectPlace} />}
         contentContainerStyle={styles.masonryContainer}
         onRefresh={fetchRestaurants}
       />
@@ -123,30 +130,87 @@ export default function HomeScreen() {
         visible={!!selectedPlace}
         animationType="slide"
         transparent={true}
-        onRequestClose={() => setSelectedPlace(null)}
+        onRequestClose={() => handleSelectPlace(null)}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             {selectedPlace && (
               <>
-                <Image
-                  source={{ uri: selectedPlace.photo_url }}
-                  style={styles.modalImage}
-                  contentFit="cover"
-                />
-                <View style={styles.modalBody}>
-                  <Text style={styles.modalTitle}>{selectedPlace.name}</Text>
-                  <Text style={styles.modalAddress}>{selectedPlace.address}</Text>
+                <View style={{ height: '50%', width: '100%' }}>
+                  <ScrollView 
+                    horizontal 
+                    pagingEnabled 
+                    showsHorizontalScrollIndicator={false}
+                    style={{ flex: 1 }}
+                  >
+                    {(placeDetails?.photos && placeDetails.photos.length > 0 ? placeDetails.photos : [selectedPlace.photo_url]).map((photoUri, index) => (
+                      <Image
+                        key={index}
+                        source={{ uri: photoUri }}
+                        style={{ width: SCREEN_WIDTH, height: '100%' }}
+                        contentFit="cover"
+                      />
+                    ))}
+                  </ScrollView>
+                  <View style={styles.carouselIndicators}>
+                    {(placeDetails?.photos && placeDetails.photos.length > 0 ? placeDetails.photos : [selectedPlace.photo_url]).map((_, i) => (
+                      <View key={i} style={styles.dot} />
+                    ))}
+                  </View>
+                </View>
+                <ScrollView contentContainerStyle={styles.modalBody}>
+                  <View>
+                    <Text style={styles.modalTitle}>{selectedPlace.name}</Text>
+                    {selectedPlace.rating ? (
+                      <Text style={styles.ratingText}>
+                        ⭐ {selectedPlace.rating} ({selectedPlace.user_ratings_total} reseñas)
+                      </Text>
+                    ) : null}
+                    <Text style={styles.modalAddress}>{selectedPlace.address}</Text>
+
+                    {loadingDetails ? (
+                      <ActivityIndicator style={{ marginTop: 16 }} size="small" color="#ff5252" />
+                    ) : placeDetails ? (
+                      <View style={styles.detailsContainer}>
+                        {(() => {
+                           const statusText = placeDetails.open_now ? 'Abierto ahora' : 'Cerrado';
+                           const statusColor = placeDetails.open_now ? '#4CAF50' : '#F44336';
+                           
+                           let hoursToday = '';
+                           if (placeDetails.weekday_text && placeDetails.weekday_text.length > 0) {
+                             // En la API de Google Places, weekday_text asume índice 0 = Lunes
+                             const todayIdx = (new Date().getDay() + 6) % 7;
+                             const todayString = placeDetails.weekday_text[todayIdx] || placeDetails.weekday_text[0];
+                             const splitIdx = todayString.indexOf(':');
+                             if (splitIdx !== -1) {
+                               hoursToday = todayString.slice(splitIdx + 1).trim();
+                             } else {
+                               hoursToday = todayString;
+                             }
+                           }
+
+                           return (
+                             <Text style={{ fontSize: 16 }}>
+                               {placeDetails.open_now !== undefined && (
+                                 <Text style={{ fontWeight: 'bold', color: statusColor }}>{statusText}</Text>
+                               )}
+                               {hoursToday ? <Text style={{ color: '#555' }}> • {hoursToday}</Text> : null}
+                             </Text>
+                           );
+                        })()}
+                      </View>
+                    ) : null}
+                  </View>
                   
                   <View style={styles.modalActions}>
                     <Pressable style={styles.mapsButton} onPress={openGoogleMaps}>
                       <Text style={styles.mapsButtonText}>Abrir en Maps</Text>
                     </Pressable>
-                    <Pressable style={styles.closeButton} onPress={() => setSelectedPlace(null)}>
+                    <Pressable style={styles.closeButton} onPress={() => handleSelectPlace(null)}>
                       <Text style={styles.closeButtonText}>Cerrar</Text>
                     </Pressable>
                   </View>
-                </View>
+                </ScrollView>
               </>
             )}
           </View>
@@ -203,9 +267,20 @@ const styles = StyleSheet.create({
     height: '60%',
     overflow: 'hidden',
   },
-  modalImage: {
+  carouselIndicators: {
+    position: 'absolute',
+    bottom: 12,
     width: '100%',
-    height: '50%',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 6,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.8)',
   },
   modalBody: {
     padding: 24,
@@ -217,11 +292,42 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#222',
   },
+  ratingText: {
+    fontSize: 14,
+    color: '#E6A11D',
+    fontWeight: 'bold',
+    marginTop: 4,
+  },
   modalAddress: {
     fontSize: 16,
     color: '#666',
     marginTop: 8,
     lineHeight: 22,
+  },
+  detailsContainer: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+  },
+  openStatus: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  hoursContainer: {
+    marginTop: 8,
+  },
+  hoursTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#444',
+    marginBottom: 4,
+  },
+  hourText: {
+    fontSize: 13,
+    color: '#666',
+    lineHeight: 20,
   },
   modalActions: {
     flexDirection: 'row',
